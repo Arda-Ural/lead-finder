@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 
 type Lead = {
   id: number;
@@ -10,7 +10,16 @@ type Lead = {
   phone: string | null;
   website: boolean;
   score: number;
-  status: "Yeni" | "İncelendi";
+  status:
+    | "Yeni"
+    | "İncelendi"
+    | "Mesaj Hazır"
+    | "WhatsApp Açıldı"
+    | "Gönderildi"
+    | "Cevap Geldi"
+    | "Olumsuz";
+  address?: string;
+  mapsUrl?: string | null;
 };
 
 const demoLeads: Lead[] = [
@@ -56,6 +65,12 @@ export default function Home() {
     "Tümü" | "Web Sitesi Yok" | "Web Sitesi Var"
   >("Tümü");
 
+  const [editingLead, setEditingLead] = useState<Lead | null>(null);
+
+  const [message, setMessage] = useState("");
+  const [queue, setQueue] = useState<Lead[]>([]);
+  const [queueIndex, setQueueIndex] = useState(0);
+
   async function searchLeads() {
     if (!category.trim() || !city.trim()) {
       alert("Lütfen sektör ve bölge gir.");
@@ -94,6 +109,8 @@ export default function Home() {
           website: Boolean(lead.hasWebsite),
           score: lead.score,
           status: "Yeni",
+          address: lead.address || "",
+          mapsUrl: lead.mapsUrl || null,
         })
       );
 
@@ -107,7 +124,34 @@ export default function Home() {
     }
   }
 
-  function openWhatsApp(lead: Lead) {
+  function createMessage(lead: Lead) {
+    let newMessage = `Merhaba ${lead.name} 👋\n\n`;
+
+    newMessage +=
+      "İşletmenizi internette incelerken size ulaşmak istedim. " +
+      "İşletmelere özel profesyonel web siteleri, yapay zekâ destekli " +
+      "randevu sistemleri ve dijital çözümler geliştiriyorum.\n\n";
+
+    if (lead.website) {
+      newMessage +=
+        "Mevcut web sitenizi inceledim. Daha modern, hızlı ve " +
+        "müşteri dönüşümünü artırmaya yönelik bir yapı konusunda " +
+        "size yardımcı olabilirim.\n\n";
+    } else {
+      newMessage +=
+        "Şu anda işletmenize ait profesyonel bir web sitesi " +
+        "göremedim. İşletmenize özel modern bir web sitesi ve " +
+        "WhatsApp üzerinden çalışan randevu sistemi hazırlayabilirim.\n\n";
+    }
+
+    newMessage +=
+      "İsterseniz işletmenize özel hazırladığım kısa bir demo " +
+      "gösterebilirim. Herhangi bir yükümlülük bulunmuyor. 😊";
+
+    return newMessage;
+  }
+
+  function openWhatsApp(lead: Lead, customMessage?: string) {
     if (!lead.phone) {
       alert("Bu işletmenin telefon numarası bulunamadı.");
       return;
@@ -123,30 +167,83 @@ export default function Home() {
       whatsappPhone = "90" + phone;
     }
 
-    let message = `Merhaba ${lead.name} 👋\n\n`;
-
-    message +=
-      "İşletmenizi internette incelerken size ulaşmak istedim. " +
-      "İşletmelere özel modern web sitesi ve yapay zekâ destekli " +
-      "randevu sistemleri geliştiriyorum.\n\n";
-
-    if (lead.website) {
-      message +=
-        "Mevcut web siteniz için daha modern ve dönüşüm odaklı " +
-        "bir yapı üzerine çalışabiliriz.\n\n";
-    } else {
-      message +=
-        "İşletmeniz için size özel profesyonel bir web sitesi ve " +
-        "WhatsApp üzerinden çalışan randevu sistemi hazırlayabilirim.\n\n";
-    }
-
-    message += "İsterseniz size kısa bir demo gösterebilirim. 😊";
+    const finalMessage = customMessage || createMessage(lead);
 
     const url =
       `https://wa.me/${whatsappPhone}?text=` +
-      encodeURIComponent(message);
+      encodeURIComponent(finalMessage);
 
     window.open(url, "_blank");
+  }
+
+  function editMessage(lead: Lead) {
+    setEditingLead(lead);
+    setMessage(createMessage(lead));
+  }
+  function startQueue() {
+    const potentialLeads = leads.filter(
+      (lead) => lead.score >= 80 && !lead.website && lead.phone
+    );
+
+    if (potentialLeads.length === 0) {
+      alert("İletişime uygun yüksek potansiyelli lead bulunamadı.");
+      return;
+    }
+
+    setQueue(potentialLeads);
+    setQueueIndex(0);
+
+    const firstLead = potentialLeads[0];
+    setEditingLead(firstLead);
+    setMessage(createMessage(firstLead));
+  }
+
+  function nextQueueLead() {
+    if (queueIndex + 1 >= queue.length) {
+      alert("🎉 Tüm leadler tamamlandı!");
+      setQueue([]);
+      setQueueIndex(0);
+      setEditingLead(null);
+      setMessage("");
+      return;
+    }
+
+    const nextIndex = queueIndex + 1;
+    const nextLead = queue[nextIndex];
+
+    setQueueIndex(nextIndex);
+    setEditingLead(nextLead);
+    setMessage(createMessage(nextLead));
+  }
+
+  function sendEditedMessage() {
+    if (!editingLead) return;
+
+    openWhatsApp(editingLead, message);
+
+    setLeads((prev) =>
+      prev.map((lead) =>
+        lead.id === editingLead.id
+          ? { ...lead, status: "WhatsApp Açıldı" }
+          : lead
+      )
+    );
+
+    setEditingLead(null);
+    setMessage("");
+  }
+
+  function handleStatusChange(
+    leadId: number,
+    status: Lead["status"]
+  ) {
+    setLeads((prev) =>
+      prev.map((lead) =>
+        lead.id === leadId
+          ? { ...lead, status }
+          : lead
+      )
+    );
   }
 
   const highPotential = leads.filter(
@@ -175,92 +272,53 @@ export default function Home() {
 
   return (
     <main className="min-h-screen bg-[#07090d] text-white">
-      {/* HEADER */}
-      <header className="border-b border-white/10 bg-[#0a0d12]/90">
-        <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-5">
-          <div>
-            <h1 className="text-xl font-bold tracking-tight">
-              Lead<span className="text-blue-500">Finder</span>
-            </h1>
+      <div className="mx-auto max-w-7xl px-6 py-10">
 
-            <p className="text-xs text-gray-500">
-              Otomatik müşteri bulma sistemi
-            </p>
+        <header className="mb-10">
+          <div className="mb-3 inline-flex rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm text-gray-300">
+            🚀 AI Lead Finder
           </div>
 
-          <div className="flex items-center gap-3">
-            <span className="h-2 w-2 rounded-full bg-green-500 shadow-[0_0_12px_#22c55e]" />
-
-            <span className="text-sm text-gray-400">
-              Sistem aktif
+          <h1 className="text-4xl font-bold tracking-tight md:text-6xl">
+            Potansiyel müşterilerini
+            <span className="block text-blue-400">
+              daha hızlı bul.
             </span>
-          </div>
-        </div>
-      </header>
+          </h1>
 
-      <div className="mx-auto max-w-7xl px-6 py-8">
-        {/* HERO */}
-        <section className="mb-8">
-          <p className="mb-2 text-sm font-medium text-blue-500">
-            OTOMASYON PANELİ
+          <p className="mt-4 max-w-2xl text-gray-400">
+            İşletmeleri bul, web sitesi durumlarını kontrol et,
+            potansiyel müşterileri filtrele ve WhatsApp üzerinden
+            kişiselleştirilmiş mesaj gönder.
           </p>
+        </header>
 
-          <h2 className="text-3xl font-bold tracking-tight md:text-4xl">
-            Yeni müşterileri
-            <br />
-
-            <span className="text-gray-500">
-              otomatik olarak keşfet.
-            </span>
-          </h2>
-
-          <p className="mt-3 max-w-2xl text-gray-400">
-            Hedef sektörünü ve bölgeni seç. Sistem potansiyel
-            işletmeleri bulsun, analiz etsin ve satış sürecini
-            kolaylaştır.
-          </p>
-        </section>
-
-        {/* SEARCH */}
-        <section className="mb-8 rounded-2xl border border-white/10 bg-[#0d1118] p-5">
-          <div className="mb-4">
-            <h3 className="font-semibold">
-              İşletme ara
-            </h3>
-
-            <p className="text-sm text-gray-500">
-              Hedef müşteri kriterlerini belirle.
-            </p>
-          </div>
-
+        <section className="mb-8 rounded-3xl border border-white/10 bg-white/[0.03] p-6">
           <div className="grid gap-4 md:grid-cols-[1fr_1fr_auto]">
+
             <div>
-              <label className="mb-2 block text-xs text-gray-500">
-                SEKTÖR
+              <label className="mb-2 block text-sm text-gray-400">
+                Sektör
               </label>
 
               <input
                 value={category}
-                onChange={(e) =>
-                  setCategory(e.target.value)
-                }
-                className="w-full rounded-xl border border-white/10 bg-[#080b10] px-4 py-3 outline-none transition focus:border-blue-500"
-                placeholder="Örn. Erkek Kuaförü"
+                onChange={(e) => setCategory(e.target.value)}
+                placeholder="Örn: Erkek Kuaförü"
+                className="w-full rounded-xl border border-white/10 bg-black/30 px-4 py-3 outline-none transition focus:border-blue-500"
               />
             </div>
 
             <div>
-              <label className="mb-2 block text-xs text-gray-500">
-                BÖLGE
+              <label className="mb-2 block text-sm text-gray-400">
+                Şehir / Bölge
               </label>
 
               <input
                 value={city}
-                onChange={(e) =>
-                  setCity(e.target.value)
-                }
-                className="w-full rounded-xl border border-white/10 bg-[#080b10] px-4 py-3 outline-none transition focus:border-blue-500"
-                placeholder="Örn. İstanbul"
+                onChange={(e) => setCity(e.target.value)}
+                placeholder="Örn: İstanbul"
+                className="w-full rounded-xl border border-white/10 bg-black/30 px-4 py-3 outline-none transition focus:border-blue-500"
               />
             </div>
 
@@ -268,248 +326,191 @@ export default function Home() {
               <button
                 onClick={searchLeads}
                 disabled={searching}
-                className="w-full rounded-xl bg-blue-600 px-7 py-3 font-semibold transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-60 md:w-auto"
+                className="w-full rounded-xl bg-blue-600 px-6 py-3 font-semibold transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                {searching
-                  ? "Aranıyor..."
-                  : "🔎 İşletme Bul"}
+                {searching ? "Aranıyor..." : "🔎 İşletmeleri Bul"}
               </button>
             </div>
+
           </div>
         </section>
 
-        {/* STATS */}
         <section className="mb-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+
           <Stat
             title="Toplam Lead"
-            value={String(leads.length)}
+            value={leads.length}
+            icon="👥"
           />
 
           <Stat
             title="Yüksek Potansiyel"
-            value={String(highPotential)}
+            value={highPotential}
+            icon="🔥"
           />
 
           <Stat
             title="Web Sitesi Yok"
-            value={String(withoutWebsite)}
+            value={withoutWebsite}
+            icon="🌐"
           />
 
           <Stat
             title="Web Sitesi Var"
-            value={String(withWebsite)}
+            value={withWebsite}
+            icon="✅"
           />
+
+        </section>
+<section className="mb-6 flex flex-wrap items-center justify-between gap-4">
+  <div>
+    <h2 className="text-lg font-semibold">
+      🎯 Satış Aksiyonu
+    </h2>
+
+    <p className="mt-1 text-sm text-gray-400">
+      Yüksek potansiyelli işletmelerle sırayla iletişime geç.
+    </p>
+  </div>
+
+  <button
+    onClick={startQueue}
+    className="rounded-xl bg-gradient-to-r from-orange-500 to-red-500 px-5 py-3 font-semibold transition hover:scale-[1.02] hover:from-orange-400 hover:to-red-400"
+  >
+    🔥 Potansiyel Lead'lere Başla
+  </button>
+</section>
+        <section className="mb-6 flex flex-wrap gap-3">
+
+          <FilterButton
+            active={filter === "Tümü"}
+            onClick={() => setFilter("Tümü")}
+          >
+            Tümü ({leads.length})
+          </FilterButton>
+
+          <FilterButton
+            active={filter === "Web Sitesi Yok"}
+            onClick={() => setFilter("Web Sitesi Yok")}
+          >
+            🌐 Web Sitesi Yok ({withoutWebsite})
+          </FilterButton>
+
+          <FilterButton
+            active={filter === "Web Sitesi Var"}
+            onClick={() => setFilter("Web Sitesi Var")}
+          >
+            ✅ Web Sitesi Var ({withWebsite})
+          </FilterButton>
+
         </section>
 
-        {/* LEADS */}
-        <section className="overflow-hidden rounded-2xl border border-white/10 bg-[#0d1118]">
-          <div className="flex flex-col gap-4 border-b border-white/10 px-5 py-4 md:flex-row md:items-center md:justify-between">
-            <div>
-              <h3 className="font-semibold">
-                Potansiyel müşteriler
+        <section className="space-y-4">
+
+          {filteredLeads.length === 0 ? (
+            <div className="rounded-3xl border border-white/10 bg-white/[0.03] p-12 text-center">
+              <div className="mb-3 text-4xl">🔍</div>
+
+              <h3 className="text-xl font-semibold">
+                Lead bulunamadı
               </h3>
 
-              <p className="text-sm text-gray-500">
-                {city} · {category}
+              <p className="mt-2 text-gray-400">
+                Bu filtreye uygun işletme bulunmuyor.
               </p>
             </div>
+          ) : (
+            filteredLeads.map((lead) => (
+              <LeadCard
+                key={lead.id}
+                lead={lead}
+                onWhatsApp={openWhatsApp}
+                onEditMessage={editMessage}
+                onStatusChange={handleStatusChange}
+              />
+            ))
+          )}
 
-            {/* FILTERS */}
-            <div className="flex flex-wrap gap-2">
-              <FilterButton
-                active={filter === "Tümü"}
-                onClick={() => setFilter("Tümü")}
-              >
-                Tümü ({leads.length})
-              </FilterButton>
-
-              <FilterButton
-                active={filter === "Web Sitesi Yok"}
-                onClick={() =>
-                  setFilter("Web Sitesi Yok")
-                }
-              >
-                🔴 Web Sitesi Yok ({withoutWebsite})
-              </FilterButton>
-
-              <FilterButton
-                active={filter === "Web Sitesi Var"}
-                onClick={() =>
-                  setFilter("Web Sitesi Var")
-                }
-              >
-                🟢 Web Sitesi Var ({withWebsite})
-              </FilterButton>
-            </div>
-          </div>
-
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[1000px] text-left">
-              <thead className="border-b border-white/10 text-xs text-gray-500">
-                <tr>
-                  <th className="px-5 py-4">
-                    İŞLETME
-                  </th>
-
-                  <th className="px-5 py-4">
-                    KONUM
-                  </th>
-
-                  <th className="px-5 py-4">
-                    TELEFON
-                  </th>
-
-                  <th className="px-5 py-4">
-                    WEB SİTESİ
-                  </th>
-
-                  <th className="px-5 py-4">
-                    POTANSİYEL
-                  </th>
-
-                  <th className="px-5 py-4">
-                    DURUM
-                  </th>
-
-                  <th className="px-5 py-4">
-                    İLETİŞİM
-                  </th>
-                </tr>
-              </thead>
-
-              <tbody>
-                {filteredLeads.length > 0 ? (
-                  filteredLeads.map((lead) => (
-                    <tr
-                      key={lead.id}
-                      className="border-b border-white/5 transition hover:bg-white/[0.02]"
-                    >
-                      <td className="px-5 py-5">
-                        <div>
-                          <p className="font-medium">
-                            {lead.name}
-                          </p>
-
-                          <p className="mt-1 text-xs text-gray-500">
-                            {lead.category}
-                          </p>
-                        </div>
-                      </td>
-
-                      <td className="px-5 py-5 text-sm text-gray-400">
-                        {lead.city}
-                      </td>
-
-                      <td className="px-5 py-5 text-sm text-gray-400">
-                        {lead.phone || "Telefon yok"}
-                      </td>
-
-                      <td className="px-5 py-5">
-                        {lead.website ? (
-                          <span className="rounded-full bg-green-500/10 px-3 py-1 text-xs text-green-400">
-                            Var
-                          </span>
-                        ) : (
-                          <span className="rounded-full bg-red-500/10 px-3 py-1 text-xs text-red-400">
-                            Yok
-                          </span>
-                        )}
-                      </td>
-
-                      <td className="px-5 py-5">
-                        <div className="flex items-center gap-3">
-                          <div className="h-2 w-20 overflow-hidden rounded-full bg-white/10">
-                            <div
-                              className="h-full rounded-full bg-blue-500"
-                              style={{
-                                width: `${lead.score}%`,
-                              }}
-                            />
-                          </div>
-
-                          <span className="text-sm font-semibold">
-                            {lead.score}
-                          </span>
-                        </div>
-                      </td>
-
-                      <td className="px-5 py-5">
-                        <span className="rounded-full bg-white/5 px-3 py-1 text-xs text-gray-400">
-                          {lead.status}
-                        </span>
-                      </td>
-
-                      <td className="px-5 py-5">
-                        {lead.phone ? (
-                          <button
-                            onClick={() =>
-                              openWhatsApp(lead)
-                            }
-                            className="whitespace-nowrap rounded-lg bg-green-600 px-3 py-2 text-xs font-semibold transition hover:bg-green-500"
-                          >
-                            💬 WhatsApp
-                          </button>
-                        ) : (
-                          <span className="text-xs text-gray-600">
-                            Numara yok
-                          </span>
-                        )}
-                      </td>
-                    </tr>
-                  ))
-                ) : (
-                  <tr>
-                    <td
-                      colSpan={7}
-                      className="px-5 py-12 text-center"
-                    >
-                      <p className="text-gray-400">
-                        Bu filtreye uygun işletme bulunamadı.
-                      </p>
-
-                      <button
-                        onClick={() =>
-                          setFilter("Tümü")
-                        }
-                        className="mt-3 text-sm text-blue-500 hover:text-blue-400"
-                      >
-                        Tüm işletmeleri göster
-                      </button>
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-
-          <div className="border-t border-white/10 px-5 py-4">
-            <p className="text-xs text-gray-500">
-              {filteredLeads.length} işletme gösteriliyor
-            </p>
-          </div>
         </section>
 
-        {/* FEATURES */}
-        <section className="mt-8 grid gap-4 md:grid-cols-3">
-          <Feature
-            number="01"
-            title="İşletme keşfi"
-            text="Hedeflediğin sektördeki işletmeleri otomatik olarak topla."
-          />
-
-          <Feature
-            number="02"
-            title="AI analizi"
-            text="Her işletmenin müşteri olma potansiyelini otomatik değerlendir."
-          />
-
-          <Feature
-            number="03"
-            title="Outreach"
-            text="Uygun iletişim kanallarından kişiselleştirilmiş iletişim akışı oluştur."
-          />
-        </section>
       </div>
+
+      {editingLead && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 backdrop-blur-sm">
+          <div className="w-full max-w-2xl rounded-3xl border border-white/10 bg-[#11141a] p-6 shadow-2xl">
+
+            <div className="mb-5 flex items-center justify-between">
+              <div>
+                <h2 className="text-2xl font-bold">
+                  ✏️ Mesajı Düzenle
+                </h2>
+
+                <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-gray-400">
+                  <span>
+                    {editingLead.name} için WhatsApp mesajı
+                  </span>
+
+                  {queue.length > 0 && (
+                    <span className="rounded-full bg-blue-500/10 px-3 py-1 text-xs font-semibold text-blue-400">
+                      Lead {queueIndex + 1} / {queue.length}
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              <button
+                onClick={() => {
+                  setEditingLead(null);
+                  setMessage("");
+                }}
+                className="rounded-xl px-3 py-2 text-gray-400 transition hover:bg-white/10 hover:text-white"
+              >
+                ✕
+              </button>
+            </div>
+
+            <textarea
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
+              rows={12}
+              className="w-full resize-none rounded-2xl border border-white/10 bg-black/30 p-4 text-sm leading-6 text-white outline-none transition focus:border-blue-500"
+            />
+
+            <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:justify-end">
+
+              <button
+                onClick={() => {
+                  setEditingLead(null);
+                  setMessage("");
+                }}
+                className="rounded-xl border border-white/10 px-5 py-3 font-semibold text-gray-300 transition hover:bg-white/10"
+              >
+                Vazgeç
+              </button>
+
+              {queue.length > 0 && (
+                <button
+                  onClick={nextQueueLead}
+                  className="rounded-xl border border-blue-500/30 bg-blue-500/10 px-5 py-3 font-semibold text-blue-400 transition hover:bg-blue-500/20"
+                >
+                  ➡️ Sonraki Lead
+                </button>
+              )}
+
+              <button
+                onClick={sendEditedMessage}
+                disabled={!message.trim()}
+                className="rounded-xl bg-green-600 px-5 py-3 font-semibold transition hover:bg-green-500 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                💬 WhatsApp'ta Aç
+              </button>
+
+            </div>
+
+          </div>
+        </div>
+      )}
+
     </main>
   );
 }
@@ -517,19 +518,23 @@ export default function Home() {
 function Stat({
   title,
   value,
+  icon,
 }: {
   title: string;
-  value: string;
+  value: number;
+  icon: string;
 }) {
   return (
-    <div className="rounded-2xl border border-white/10 bg-[#0d1118] p-5">
-      <p className="text-sm text-gray-500">
-        {title}
-      </p>
+    <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5">
+      <div className="mb-3 text-2xl">{icon}</div>
 
-      <p className="mt-2 text-3xl font-bold">
+      <div className="text-3xl font-bold">
         {value}
-      </p>
+      </div>
+
+      <div className="mt-1 text-sm text-gray-400">
+        {title}
+      </div>
     </div>
   );
 }
@@ -541,15 +546,15 @@ function FilterButton({
 }: {
   active: boolean;
   onClick: () => void;
-  children: React.ReactNode;
+  children: ReactNode;
 }) {
   return (
     <button
       onClick={onClick}
-      className={`rounded-lg border px-3 py-2 text-xs font-medium transition ${
+      className={`rounded-xl border px-4 py-2 text-sm font-medium transition ${
         active
-          ? "border-blue-500 bg-blue-500/10 text-blue-400"
-          : "border-white/10 text-gray-400 hover:bg-white/5"
+          ? "border-blue-500 bg-blue-600 text-white"
+          : "border-white/10 bg-white/[0.03] text-gray-300 hover:bg-white/[0.08]"
       }`}
     >
       {children}
@@ -557,28 +562,148 @@ function FilterButton({
   );
 }
 
-function Feature({
-  number,
-  title,
-  text,
+function LeadCard({
+  lead,
+  onWhatsApp,
+  onEditMessage,
+  onStatusChange,
 }: {
-  number: string;
-  title: string;
-  text: string;
+  lead: Lead;
+  onWhatsApp: (lead: Lead) => void;
+  onEditMessage: (lead: Lead) => void;
+  onStatusChange: (leadId: number, status: Lead["status"]) => void;
 }) {
   return (
-    <div className="rounded-2xl border border-white/10 bg-[#0d1118] p-5">
-      <span className="text-xs font-bold text-blue-500">
-        {number}
-      </span>
+    <div className="rounded-3xl border border-white/10 bg-white/[0.03] p-6 transition hover:border-white/20">
 
-      <h3 className="mt-3 font-semibold">
-        {title}
-      </h3>
+      <div className="flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
 
-      <p className="mt-2 text-sm leading-6 text-gray-500">
-        {text}
-      </p>
+        <div className="flex-1">
+
+          <div className="mb-3 flex flex-wrap items-center gap-3">
+
+            <h2 className="text-xl font-bold">
+              {lead.name}
+            </h2>
+
+            <span
+              className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                lead.website
+                  ? "bg-green-500/10 text-green-400"
+                  : "bg-red-500/10 text-red-400"
+              }`}
+            >
+              {lead.website
+                ? "Web Sitesi Var"
+                : "Web Sitesi Yok"}
+            </span>
+
+            <span
+              className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                lead.status === "Yeni"
+                  ? "bg-blue-500/10 text-blue-400"
+                  : lead.status === "Mesaj Hazır"
+                  ? "bg-yellow-500/10 text-yellow-400"
+                  : lead.status === "WhatsApp Açıldı"
+                  ? "bg-purple-500/10 text-purple-400"
+                  : lead.status === "Gönderildi"
+                  ? "bg-green-500/10 text-green-400"
+                  : lead.status === "Cevap Geldi"
+                  ? "bg-cyan-500/10 text-cyan-400"
+                  : "bg-gray-500/10 text-gray-400"
+              }`}
+            >
+              {lead.status}
+            </span>
+
+            <select
+              value={lead.status}
+              onChange={(e) =>
+                onStatusChange(
+                  lead.id,
+                  e.target.value as Lead["status"]
+                )
+              }
+              className="rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-white outline-none transition hover:bg-white/10"
+            >
+              <option value="Yeni">Yeni</option>
+              <option value="İncelendi">İncelendi</option>
+              <option value="Mesaj Hazır">Mesaj Hazır</option>
+              <option value="WhatsApp Açıldı">WhatsApp Açıldı</option>
+              <option value="Gönderildi">Gönderildi</option>
+              <option value="Cevap Geldi">Cevap Geldi</option>
+              <option value="Olumsuz">Olumsuz</option>
+            </select>
+
+          </div>
+
+          <div className="grid gap-2 text-sm text-gray-400 md:grid-cols-2">
+
+            <div>
+              📂 {lead.category}
+            </div>
+
+            <div>
+              📍 {lead.city}
+            </div>
+
+            <div>
+              📞 {lead.phone || "Telefon bulunamadı"}
+            </div>
+
+            {lead.address && (
+              <div>
+                🏠 {lead.address}
+              </div>
+            )}
+
+          </div>
+
+        </div>
+
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+
+          <div className="rounded-2xl border border-white/10 bg-black/20 px-5 py-3 text-center">
+            <div className="text-xs text-gray-500">
+              Potansiyel
+            </div>
+
+            <div className="text-2xl font-bold text-blue-400">
+              %{lead.score}
+            </div>
+          </div>
+
+          {lead.mapsUrl && (
+            <a
+              href={lead.mapsUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="rounded-xl border border-white/10 px-5 py-3 text-center text-sm font-semibold transition hover:bg-white/10"
+            >
+              📍 Maps
+            </a>
+          )}
+
+          <button
+            onClick={() => onEditMessage(lead)}
+            disabled={!lead.phone}
+            className="rounded-xl border border-blue-500/30 bg-blue-500/10 px-5 py-3 text-sm font-semibold text-blue-400 transition hover:bg-blue-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            ✏️ Mesajı Düzenle
+          </button>
+
+          <button
+            onClick={() => onWhatsApp(lead)}
+            disabled={!lead.phone}
+            className="rounded-xl bg-green-600 px-5 py-3 text-sm font-semibold transition hover:bg-green-500 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            💬 WhatsApp
+          </button>
+
+        </div>
+
+      </div>
+
     </div>
   );
 }
