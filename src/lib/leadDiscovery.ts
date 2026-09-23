@@ -217,7 +217,7 @@ const OVERPASS_ENDPOINTS = [
 function buildAreaQuery(areaId: number, tagPairs: [string, string][], nameTerm: string): string {
   const tagLines = tagPairs.map(([k, v]) => `  nwr["${k}"="${v}"](area.searchArea);`).join("\n");
   return `
-[out:json][timeout:20];
+[out:json][timeout:25];
 area(${areaId})->.searchArea;
 (
 ${tagLines ? tagLines + "\n" : ""}  nwr["name"~"${nameTerm}",i](area.searchArea);
@@ -237,7 +237,7 @@ function buildAroundQuery(
     .map(([k, v]) => `  nwr["${k}"="${v}"](around:${radiusMeters},${lat},${lon});`)
     .join("\n");
   return `
-[out:json][timeout:20];
+[out:json][timeout:25];
 (
 ${tagLines ? tagLines + "\n" : ""}  nwr["name"~"${nameTerm}",i](around:${radiusMeters},${lat},${lon});
 );
@@ -260,7 +260,7 @@ async function runOverpassQuery(query: string): Promise<OverpassElement[]> {
   for (const endpoint of OVERPASS_ENDPOINTS) {
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 18000);
+      const timeout = setTimeout(() => controller.abort(), 30000);
 
       const res = await fetch(endpoint, {
         method: "POST",
