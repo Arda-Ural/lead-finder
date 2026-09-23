@@ -2,10 +2,18 @@
  * Keyless business discovery layer for the Lead Finder API.
  *
  * Replaces the paid Google Places API with public, key-free data sources:
- *  - OpenStreetMap Nominatim  -> resolves "city" text into a searchable area
- *  - OpenStreetMap Overpass   -> finds businesses inside that area
- *  - A lightweight homepage fetch -> best-effort HTTPS / mobile-friendly /
- *    online-booking signal for businesses that do have a website
+ *  - OpenStreetMap Nominatim -> resolves "city" text into a lat/lon + bbox
+ *  - Postpass (postpass.geofabrik.de) -> PRIMARY: SQL-over-OSM, free, no key
+ *  - Overpass API (overpass-api.de / kumi.systems) -> FALLBACK only
+ *
+ * Why Postpass is primary and Overpass is just a fallback:
+ * Since Jan 2026 the main public Overpass instances have been actively
+ * blocking large chunks of AWS/Azure IP ranges due to abuse (see
+ * https://community.openstreetmap.org/t/overpass-api-will-block-azure-and-aws-for-some-time/136817
+ * and https://wiki.openstreetmap.org/wiki/Overpass_API/status). Vercel's
+ * serverless functions run on AWS, so Overpass calls from this app fail
+ * reliably. Postpass (run by Geofabrik) is a separate, unrelated service
+ * and is not part of that block, so it's used first.
  *
  * This module ONLY produces data. It intentionally returns objects shaped
  * to match what /api/leads/search already sent to the frontend
@@ -80,8 +88,7 @@ export function normalizePhoneTR(raw: string | null | undefined): string | null 
   let digits = first.replace(/[^\d+]/g, "");
 
   if (digits.startsWith("+")) digits = digits.slice(1);
-  if (digits.startsWith("0090")) digits = digits.slice(2);
-  if (digits.startsWith("0090".slice(0, 2)) && digits.startsWith("00")) digits = digits.slice(2);
+  if (digits.startsWith("00")) digits = digits.slice(2);
 
   if (digits.startsWith("90") && digits.length === 12) {
     // already "90XXXXXXXXXX"
@@ -97,8 +104,8 @@ export function normalizePhoneTR(raw: string | null | undefined): string | null 
 
 // ---------------------------------------------------------------------------
 // Category -> OSM tag mapping (best-effort; falls back to a free-text
-// name search on Overpass when a category isn't in the dictionary, so any
-// Turkish sector term still works, just with lower precision).
+// name search when a category isn't in the dictionary, so any Turkish
+// sector term still works, just with lower precision).
 // ---------------------------------------------------------------------------
 
 const CATEGORY_TAGS: Record<string, [string, string][]> = {
@@ -145,12 +152,12 @@ function resolveTags(category: string): [string, string][] {
   return Array.from(new Map(matches.map((t) => [t.join("="), t])).values());
 }
 
-function escapeOverpassRegex(term: string): string {
-  return term.trim().replace(/["\\]/g, "").slice(0, 60);
+function sanitizeSearchTerm(term: string): string {
+  return term.trim().slice(0, 60);
 }
 
 // ---------------------------------------------------------------------------
-// Step 1: geocode the free-text city/region into an OSM area (or point)
+// Step 1: geocode the free-text city/region into a lat/lon + bounding box
 // ---------------------------------------------------------------------------
 
 interface GeocodedPlace {
@@ -158,7 +165,7 @@ interface GeocodedPlace {
   id: number;
   lat: number;
   lon: number;
-  displayName: string;
+  bbox: { south: number; north: number; west: number; east: number };
 }
 
 async function geocodeCity(city: string): Promise<GeocodedPlace | null> {
@@ -186,7 +193,7 @@ async function geocodeCity(city: string): Promise<GeocodedPlace | null> {
     osm_id: number;
     lat: string;
     lon: string;
-    display_name: string;
+    boundingbox?: [string, string, string, string];
   }>;
 
   if (!Array.isArray(data) || data.length === 0) return null;
@@ -196,17 +203,139 @@ async function geocodeCity(city: string): Promise<GeocodedPlace | null> {
     return null;
   }
 
-  return {
-    type: first.osm_type,
-    id: Number(first.osm_id),
-    lat: Number(first.lat),
-    lon: Number(first.lon),
-    displayName: first.display_name,
-  };
+  const lat = Number(first.lat);
+  const lon = Number(first.lon);
+
+  let bbox: GeocodedPlace["bbox"];
+  if (first.boundingbox) {
+    const [south, north, west, east] = first.boundingbox.map(Number);
+    bbox = { south, north, west, east };
+  } else {
+    // Fallback: ~15km box around the point if Nominatim didn't send one.
+    bbox = { south: lat - 0.15, north: lat + 0.15, west: lon - 0.15, east: lon + 0.15 };
+  }
+
+  return { type: first.osm_type, id: Number(first.osm_id), lat, lon, bbox };
 }
 
 // ---------------------------------------------------------------------------
-// Step 2: query Overpass for businesses in that area
+// Step 2a (PRIMARY): query Postpass — SQL over a PostGIS mirror of OSM data,
+// run by Geofabrik. Free, keyless, and not affected by Overpass's AWS block.
+// Docs: https://wiki.openstreetmap.org/wiki/Postpass
+// ---------------------------------------------------------------------------
+
+const POSTPASS_ENDPOINT = "https://postpass.geofabrik.de/api/interpreter";
+
+function escapeSql(value: string): string {
+  return value.replace(/'/g, "''");
+}
+
+function buildPostpassQuery(
+  bbox: GeocodedPlace["bbox"],
+  tagPairs: [string, string][],
+  nameTerm: string
+): string {
+  const tagConditions = tagPairs.map(([k, v]) => `tags->>'${escapeSql(k)}' = '${escapeSql(v)}'`);
+  const nameCondition = `tags->>'name' ILIKE '%${escapeSql(nameTerm)}%'`;
+  const whereClause = [...tagConditions, nameCondition].join("\n     OR ");
+  const envelope = `ST_SetSRID(ST_MakeBox2D(ST_MakePoint(${bbox.west},${bbox.south}), ST_MakePoint(${bbox.east},${bbox.north})), 4326)`;
+
+  return `
+    SELECT osm_id, osm_type, tags, geom
+    FROM postpass_pointpolygon
+    WHERE (
+      ${whereClause}
+    )
+    AND geom && ${envelope}
+    LIMIT 200
+  `;
+}
+
+interface GeoJSONFeature {
+  type: "Feature";
+  properties: { osm_id: number; osm_type: string; tags?: Record<string, string> };
+  geometry: { type: string; coordinates: unknown } | null;
+}
+
+async function runPostpassQuery(sql: string): Promise<GeoJSONFeature[]> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 18000);
+
+  try {
+    const res = await fetch(POSTPASS_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: "data=" + encodeURIComponent(sql),
+      signal: controller.signal,
+      cache: "no-store",
+    });
+
+    if (!res.ok) {
+      const bodySnippet = await res.text().catch(() => "");
+      throw new Error(`Postpass HTTP ${res.status}: ${bodySnippet.slice(0, 300)}`);
+    }
+
+    const data = (await res.json()) as { type?: string; features?: GeoJSONFeature[] };
+    if (data.type === "FeatureCollection" && Array.isArray(data.features)) {
+      return data.features;
+    }
+    return [];
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function centroidOfGeometry(geometry: GeoJSONFeature["geometry"]): { lat?: number; lon?: number } {
+  if (!geometry) return {};
+
+  const averageRing = (coords: number[][]): { lat?: number; lon?: number } => {
+    if (!coords.length) return {};
+    let sumLon = 0;
+    let sumLat = 0;
+    for (const [lon, lat] of coords) {
+      sumLon += lon;
+      sumLat += lat;
+    }
+    return { lon: sumLon / coords.length, lat: sumLat / coords.length };
+  };
+
+  if (geometry.type === "Point") {
+    const [lon, lat] = geometry.coordinates as [number, number];
+    return { lat, lon };
+  }
+  if (geometry.type === "Polygon") {
+    const ring = (geometry.coordinates as number[][][])[0] || [];
+    return averageRing(ring);
+  }
+  if (geometry.type === "MultiPolygon") {
+    const ring = (geometry.coordinates as number[][][][])[0]?.[0] || [];
+    return averageRing(ring);
+  }
+  if (geometry.type === "LineString") {
+    return averageRing(geometry.coordinates as number[][]);
+  }
+  return {};
+}
+
+function parsePostpassFeature(feature: GeoJSONFeature, cityFallback: string): RawBusiness | null {
+  const tags = feature.properties.tags || {};
+  const name = tags.name?.trim();
+  if (!name) return null;
+
+  const { lat, lon } = centroidOfGeometry(feature.geometry);
+
+  return buildRawBusiness(
+    `osm-${feature.properties.osm_type}-${feature.properties.osm_id}`,
+    tags,
+    lat,
+    lon,
+    cityFallback
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Step 2b (FALLBACK): Overpass mirrors, tried only if Postpass itself fails
+// (e.g. Geofabrik maintenance). Kept for redundancy, not relied upon.
 // ---------------------------------------------------------------------------
 
 const OVERPASS_ENDPOINTS = [
@@ -214,32 +343,33 @@ const OVERPASS_ENDPOINTS = [
   "https://overpass.kumi.systems/api/interpreter",
 ];
 
-function buildAreaQuery(areaId: number, tagPairs: [string, string][], nameTerm: string): string {
+function buildOverpassQuery(
+  geocoded: GeocodedPlace,
+  tagPairs: [string, string][],
+  nameTerm: string
+): string {
   const tagLines = tagPairs.map(([k, v]) => `  nwr["${k}"="${v}"](area.searchArea);`).join("\n");
-  return `
-[out:json][timeout:25];
+
+  if (geocoded.type === "relation" || geocoded.type === "way") {
+    const areaId = geocoded.type === "relation" ? 3600000000 + geocoded.id : 2400000000 + geocoded.id;
+    return `
+[out:json][timeout:20];
 area(${areaId})->.searchArea;
 (
 ${tagLines ? tagLines + "\n" : ""}  nwr["name"~"${nameTerm}",i](area.searchArea);
 );
 out center tags 60;
 `;
-}
+  }
 
-function buildAroundQuery(
-  lat: number,
-  lon: number,
-  tagPairs: [string, string][],
-  nameTerm: string,
-  radiusMeters = 15000
-): string {
-  const tagLines = tagPairs
-    .map(([k, v]) => `  nwr["${k}"="${v}"](around:${radiusMeters},${lat},${lon});`)
+  const radius = 15000;
+  const aroundLines = tagPairs
+    .map(([k, v]) => `  nwr["${k}"="${v}"](around:${radius},${geocoded.lat},${geocoded.lon});`)
     .join("\n");
   return `
-[out:json][timeout:25];
+[out:json][timeout:20];
 (
-${tagLines ? tagLines + "\n" : ""}  nwr["name"~"${nameTerm}",i](around:${radiusMeters},${lat},${lon});
+${aroundLines ? aroundLines + "\n" : ""}  nwr["name"~"${nameTerm}",i](around:${radius},${geocoded.lat},${geocoded.lon});
 );
 out center tags 60;
 `;
@@ -260,7 +390,7 @@ async function runOverpassQuery(query: string): Promise<OverpassElement[]> {
   for (const endpoint of OVERPASS_ENDPOINTS) {
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 30000);
+      const timeout = setTimeout(() => controller.abort(), 18000);
 
       const res = await fetch(endpoint, {
         method: "POST",
@@ -285,17 +415,10 @@ async function runOverpassQuery(query: string): Promise<OverpassElement[]> {
     }
   }
 
-  throw new DiscoveryError(
-    "Herkese açık harita verisine (OpenStreetMap/Overpass) şu anda ulaşılamıyor. Lütfen birkaç dakika sonra tekrar deneyin.",
-    lastError
-  );
+  throw lastError instanceof Error ? lastError : new Error("Overpass fallback failed");
 }
 
-// ---------------------------------------------------------------------------
-// Step 3: parse + dedupe raw OSM elements into businesses
-// ---------------------------------------------------------------------------
-
-function parseElement(el: OverpassElement, cityFallback: string): RawBusiness | null {
+function parseOverpassElement(el: OverpassElement, cityFallback: string): RawBusiness | null {
   const tags = el.tags || {};
   const name = tags.name?.trim();
   if (!name) return null;
@@ -303,6 +426,20 @@ function parseElement(el: OverpassElement, cityFallback: string): RawBusiness | 
   const lat = el.lat ?? el.center?.lat;
   const lon = el.lon ?? el.center?.lon;
 
+  return buildRawBusiness(`osm-${el.type}-${el.id}`, tags, lat, lon, cityFallback);
+}
+
+// ---------------------------------------------------------------------------
+// Shared tag -> RawBusiness mapping (used by both Postpass and Overpass paths)
+// ---------------------------------------------------------------------------
+
+function buildRawBusiness(
+  id: string,
+  tags: Record<string, string>,
+  lat: number | undefined,
+  lon: number | undefined,
+  cityFallback: string
+): RawBusiness {
   const phoneRaw = tags.phone || tags["contact:phone"] || tags["contact:mobile"] || null;
   const whatsappRaw = tags["contact:whatsapp"] || phoneRaw;
   const websiteRaw = tags.website || tags["contact:website"] || null;
@@ -324,8 +461,8 @@ function parseElement(el: OverpassElement, cityFallback: string): RawBusiness | 
   }
 
   return {
-    id: `osm-${el.type}-${el.id}`,
-    name,
+    id,
+    name: tags.name!.trim(),
     phone: normalizePhoneTR(phoneRaw),
     whatsapp: normalizePhoneTR(whatsappRaw),
     website,
@@ -337,6 +474,10 @@ function parseElement(el: OverpassElement, cityFallback: string): RawBusiness | 
     lon,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Dedupe
+// ---------------------------------------------------------------------------
 
 function normalizeNameKey(name: string): string {
   return name.trim().toLocaleLowerCase("tr").replace(/\s+/g, " ");
@@ -359,7 +500,7 @@ function dedupeBusinesses(list: RawBusiness[]): RawBusiness[] {
 }
 
 // ---------------------------------------------------------------------------
-// Step 4: best-effort website audit (HTTPS / mobile-friendly / booking hint)
+// Step 3: best-effort website audit (HTTPS / mobile-friendly / booking hint)
 // Capped to a handful of sites per search so a single request can't stall
 // the whole search.
 // ---------------------------------------------------------------------------
@@ -406,7 +547,7 @@ async function auditWebsite(url: string): Promise<WebsiteAudit> {
 }
 
 // ---------------------------------------------------------------------------
-// Step 5: scoring — higher score = higher outreach potential for a web
+// Step 4: scoring — higher score = higher outreach potential for a web
 // developer, mirroring the intent of the old (website ? 50 : 90) logic but
 // now taking the extra signals we actually collected into account.
 // ---------------------------------------------------------------------------
@@ -446,17 +587,41 @@ export async function discoverBusinesses(city: string, category: string): Promis
   }
 
   const tagPairs = resolveTags(category);
-  const nameTerm = escapeOverpassRegex(category);
+  const nameTerm = sanitizeSearchTerm(category);
 
-  const query =
-    geocoded.type === "relation" || geocoded.type === "way"
-      ? buildAreaQuery(geocoded.type === "relation" ? 3600000000 + geocoded.id : 2400000000 + geocoded.id, tagPairs, nameTerm)
-      : buildAroundQuery(geocoded.lat, geocoded.lon, tagPairs, nameTerm);
+  let parsed: RawBusiness[] = [];
+  let postpassError: unknown = null;
 
-  const elements = await runOverpassQuery(query);
-  const parsed = elements
-    .map((el) => parseElement(el, city))
-    .filter((b): b is RawBusiness => b !== null);
+  try {
+    const sql = buildPostpassQuery(geocoded.bbox, tagPairs, nameTerm);
+    const features = await runPostpassQuery(sql);
+    parsed = features
+      .map((f) => parsePostpassFeature(f, city))
+      .filter((b): b is RawBusiness => b !== null);
+  } catch (err) {
+    postpassError = err;
+    console.error("Postpass discovery failed:", err);
+  }
+
+  // Only fall back to Overpass if Postpass genuinely returned nothing usable.
+  if (postpassError || parsed.length === 0) {
+    try {
+      const query = buildOverpassQuery(geocoded, tagPairs, nameTerm);
+      const elements = await runOverpassQuery(query);
+      const fromOverpass = elements
+        .map((el) => parseOverpassElement(el, city))
+        .filter((b): b is RawBusiness => b !== null);
+      if (fromOverpass.length > 0) parsed = fromOverpass;
+    } catch (overpassError) {
+      console.error("Overpass fallback also failed:", overpassError);
+      if (parsed.length === 0) {
+        throw new DiscoveryError(
+          "Hem Postpass hem de Overpass (yedek) üzerinden işletme verisine ulaşılamadı. Birkaç dakika sonra tekrar dene.",
+          { postpassError, overpassError }
+        );
+      }
+    }
+  }
 
   const deduped = dedupeBusinesses(parsed).slice(0, MAX_RESULTS);
 
